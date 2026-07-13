@@ -1,0 +1,310 @@
+---
+title: "The Social Network of Jeffrey Epstein"
+format: html
+editor: visual
+---
+
+## Homework 2 - Link Prediction
+
+By Clare McGarvey and Paloma Navarro
+
+### Introduction
+
+This project aims to provide a preliminary exploration into the network of actors named in the 'Epstein Files', a collection of documents, images, videos and emails related to the elite U.S. financier and convicted pedophile Jeffrey Epstein. The files detail Epstein's deep influence among his social circle of international elites, and his prolific sex-trafficking of underage girls to members of said circle.
+
+Following the signing of the Epstein Files Transparency Act into law in November of 2025, the U.S. Department of Justice has released over 3 million individual files pertaining to Epstein. Max Andrews created a [visualiser](https://epsteinvisualizer.com) of the social network of entities detailed in the files by extracting structured data from the raw documents using AI (Andrews, 2025). We thank him for his valuable contribution to a case which has been largely abandoned by traditional avenues of justice, left instead to journalists and members of the public to search for the truth and attempt to hold power to account. His data will be used for all following analysis in this project.
+
+Following the methodology established in HW1, we work on the filtered network in which all "unknown" composite nodes have been removed. As discussed there, these nodes represent multiple distinct individuals collapsed into a single label by the data extraction pipeline, and they distort centrality and structural measures.
+
+### Set-Up
+
+```{r setup, results='hide', message=FALSE, warning=FALSE}
+library(igraph)
+library(ggraph)
+library(ggplot2)
+library(RSQLite)
+library(dplyr)
+library(kableExtra)
+
+options(timeout = 600)
+
+download.file(
+  "https://media.githubusercontent.com/media/maxandrews/Epstein-doc-explorer/main/document_analysis.db",
+  "epstein_docs.db",
+  mode = "wb")
+```
+
+```{r}
+# Connect
+con <- dbConnect(SQLite(), "epstein_docs.db")
+
+# Raw triples
+raw <- dbGetQuery(con, "SELECT actor, action, target FROM rdf_triples")
+
+# Cleaning entity names
+alias_map <- c(
+  "Jeffrey E." = "Jeffrey Epstein",
+  "jeffrey E." = "Jeffrey Epstein",
+  "JEE" = "Jeffrey Epstein",
+  "Alan M. Dershowitz" = "Alan Dershowitz",
+  "Brad Edwards" = "Bradley Edwards",
+  "Bradley J. Edwards" = "Bradley Edwards",
+  "Bradley James Edwards" = "Bradley Edwards",
+  "Edwards" = "Bradley Edwards",
+  "Mr. Edwards" = "Bradley Edwards",
+  "Virginia Roberts" = "Virginia Giuffre",
+  "Virginia Roberts Giuffre" = "Virginia Giuffre",
+  "Virginia L. Giuffre" = "Virginia Giuffre",
+  "President Clinton" = "Bill Clinton",
+  "Donald J. Trump" = "Donald Trump",
+  "President Trump" = "Donald Trump",
+  "President Obama" = "Barack Obama",
+  "Barak" = "Ehud Barak",
+  "Ehud" = "Ehud Barak",
+  "Stephen K. Bannon" = "Steve Bannon",
+  "Lawrence M. Krauss" = "Lawrence Krauss",
+  "Dr. Krauss" = "Lawrence Krauss",
+  "Lawrence Summers" = "Larry Summers",
+  "Alexander Acosta" = "Alex Acosta",
+  "R. Alexander Acosta" = "Alex Acosta",
+  "Joseph Recarey" = "Detective Recarey",
+  "Joe Recarey" = "Detective Recarey",
+  "Detective Joseph Recarey" = "Detective Recarey",
+  "Larry Visoki" = "Larry Visoski",
+  "Lawrance Visoski" = "Larry Visoski",
+  "Paul Cassell" = "Paul G. Cassell",
+  "Cassell" = "Paul G. Cassell",
+  "Mr. Cassell" = "Paul G. Cassell",
+  "Kenneth Starr" = "Ken Starr",
+  "Kenneth W. Starr" = "Ken Starr",
+  "Kathryn Ruemmler" = "Kathy Ruemmler",
+  "Jean-Luc Brunel" = "Jean Luc Brunel",
+  "Martin G. Weinberg" = "Martin Weinberg",
+  "Landon Thomas" = "Landon Thomas Jr.",
+  "Landon Thomas, Jr." = "Landon Thomas Jr.",
+  "Mr. Scarola" = "Jack Scarola",
+  "Federal Bureau of Investigation" = "FBI",
+  "Department of Justice" = "Justice Department",
+  "U.S. Department of Justice" = "Justice Department",
+  "United States Government" = "U.S. Government",
+  "United States government" = "U.S. Government",
+  "court" = "Court"
+)
+
+raw$actor  <- trimws(raw$actor)
+raw$target <- trimws(raw$target)
+
+clean <- function(x, map) ifelse(x %in% names(map), map[x], x)
+raw$actor  <- clean(raw$actor,  alias_map)
+raw$target <- clean(raw$target, alias_map)
+raw <- raw[raw$actor != raw$target, ]
+
+# --- Build edge list from actor-target pairs ---
+edgelist <- raw[, c("actor", "target")]
+
+# Count how often each entity appears (as actor OR target)
+entity_freq <- table(c(edgelist$actor, edgelist$target))
+top1500       <- names(sort(entity_freq, decreasing = TRUE))[1:1500]
+
+# Keep only edges where BOTH endpoints are in the top 500
+edgelist <- edgelist[edgelist$actor %in% top1500 & edgelist$target %in% top1500, ]
+
+# Build and simplify — mirrors tutorial exactly
+epstein <- graph.data.frame(edgelist, directed = FALSE)
+epstein <- simplify(epstein)
+epstein
+
+# --- Filter out "unknown" composite nodes (consistent with HW1) ---
+unknown_nodes <- V(epstein)$name[grepl("unknown", V(epstein)$name, ignore.case = TRUE)]
+cat("Removing", length(unknown_nodes), "unknown composite nodes\n")
+epstein <- delete_vertices(epstein, unknown_nodes)
+
+# Take the giant component in case removing unknowns disconnected anything
+epstein <- decompose(epstein)[[which.max(sapply(decompose(epstein), vcount))]]
+
+dbDisconnect(con)
+```
+
+```{r}
+# Node and Edges Count
+cat("Nodes:", vcount(epstein), "\n")
+cat("Edges:", ecount(epstein), "\n")
+```
+
+### 1. Removing links
+
+Delete a fraction of real edges in the network and create a table of those links deleted (positive class) and of links non- present (negative class)
+
+```{r}
+nlinks <- 5000
+
+# Sampling 5000 random edge indices from the full network
+indexes_deleted <- sample(1:ecount(epstein), nlinks)
+
+# Create epstein' — the "observed" graph with those edges removed
+epstein_prime <- delete_edges(epstein, indexes_deleted)
+
+# Positive Class - Deleted Edges
+deleted_endpoints <- get.edges(epstein, indexes_deleted)
+true_edges <- data.frame(
+  X1  = deleted_endpoints[, 1],
+  X2  = deleted_endpoints[, 2]
+)
+
+# Negative class: non-existent links from well-connected nodes
+false_edges    <- data.frame()
+most_connected <- which(degree(epstein) > 10)
+
+while (nrow(false_edges) < nlinks) {
+  node_pair <- sample(most_connected, 2)
+  node1     <- node_pair[1]
+  node2     <- node_pair[2]
+  
+  if (get.edge.ids(epstein, c(node1, node2)) == 0) {
+    false_edges <- rbind(false_edges, data.frame(X1 = node1, X2 = node2))
+  }
+}
+
+# Assign obs labels and bind
+true_edges  <- data.frame(true_edges,  obs = 1)
+false_edges <- data.frame(false_edges, obs = 0)
+
+total_edges           <- rbind(true_edges, false_edges)
+colnames(total_edges) <- c("id1", "id2", "obs")
+
+head(total_edges)
+```
+
+### 2. Proximity Metrics
+
+Generate a number of proximity/similarty metrics heuristics for each link in the positive and negative class
+
+```{r}
+# Pre-compute neighbourhoods
+n1 <- neighborhood(epstein_prime, order = 1, nodes = total_edges$id1)
+n2 <- neighborhood(epstein_prime, order = 1, nodes = total_edges$id2)
+
+# Initialise columns — directly from tutorial
+total_edges$sim_jacc <- 0
+total_edges$sim_aa   <- 0
+total_edges$sim_pref <- 0
+
+# Heuristics loop — directly from tutorial
+for (i in 1:nrow(total_edges)) {
+
+  nei1   <- n1[[i]]
+  nei2   <- n2[[i]]
+  common <- intersect(nei1, nei2)
+
+  # 1. Jaccard: common neighbours 
+  all_nei <- union(nei1, nei2)
+  if (length(all_nei) > 0) {
+    total_edges$sim_jacc[i] <- length(common) / length(all_nei)
+  }
+
+  # 2. Adamic-Adar: rare common neighbours 
+  if (length(common) > 0) {
+    deg_common <- degree(epstein_prime, common)
+    deg_common <- deg_common[deg_common > 1]
+    total_edges$sim_aa[i] <- sum(1 / log(deg_common))
+  }
+
+  # 3. Preferential attachment: degree product 
+  total_edges$sim_pref[i] <- degree(epstein_prime, total_edges$id1[i]) *
+                               degree(epstein_prime, total_edges$id2[i])
+}
+
+head(total_edges)
+```
+
+### 3. Train a Binary Classifier
+
+Following the tutorial, we frame link prediction as a binary classification problem and fit a logistic regression model using `glm` with `family = binomial(link = "logit")`. The features are the three heuristics computed in Section 2. We add 10-fold cross-validation as required by the homework.
+
+```{r}
+# Train and test split
+set.seed(111)
+train_idx <- sample(1:nrow(total_edges), 0.7 * nrow(total_edges))
+total_edges_train <- total_edges[train_idx, ]
+total_edges_test  <- total_edges[-train_idx, ]
+
+# Logistic regression model — directly from tutorial
+glm_link <- glm(obs ~ sim_jacc + sim_aa + sim_pref,
+                data   = total_edges_train,
+                family = binomial(link = "logit"))
+
+summary(glm_link)
+```
+
+```{r}
+# Predict on the test set
+glm_prediction <- predict.glm(glm_link,
+                              newdata = total_edges_test,
+                              type    = "response")
+```
+
+#### Cross-validation
+
+To check that the model generalises and is not overfitting to a single train/test split, we run 10-fold cross-validation on the full dataset using `cv.glm` from the `boot` package.
+
+```{r}
+library(boot)
+
+set.seed(111)
+glm_full <- glm(obs ~ sim_jacc + sim_aa + sim_pref,
+                data   = total_edges,
+                family = binomial(link = "logit"))
+
+cv_result <- cv.glm(total_edges, glm_full, K = 10)
+cat("10-fold CV error estimate:", round(cv_result$delta[1], 4), "\n")
+```
+
+### 4. Model Evaluation
+
+We evaluate the model with a confusion matrix using a 0.5 probability threshold.
+
+```{r}
+require(caret)
+
+# Apply threshold
+pred <- ifelse(glm_prediction > 0.5, 1, 0)
+
+# Confusion matrix
+conf_mat <- confusionMatrix(factor(pred, levels = c(0, 1)),
+                            factor(total_edges_test$obs, levels = c(0, 1)),
+                            positive = "1")
+conf_mat
+```
+
+#### Which heuristic is the most important?
+
+The `summary(glm_link)` output above shows the coefficient and significance (z-statistic, p-value) of each heuristic. The heuristic with the largest absolute z-statistic — i.e. the one whose effect is most clearly distinguishable from zero — is the most important predictor.
+
+```{r}
+# Extract z-statistics from the fitted model
+coefs <- summary(glm_link)$coefficients
+coefs
+```
+
+### Discussion
+
+
+### 5. Potential Improvements to the Link Prediction
+
+Several directions could meaningfully improve our model:
+
+**More heuristics.** We used three classical local heuristics, but many others exist. Adding **resource allocation** (similar to Adamic-Adar but with a 1/k weighting instead of 1/log(k)), **common neighbors count**, **Salton index**, or path-based metrics like **Katz centrality** could capture complementary signals about link likelihood. Global metrics that consider the full network structure rather than just local neighborhoods (such as **SimRank**) tend to perform especially well on networks like ours where short paths through hubs carry meaningful information.
+
+**Beyond logistic regression.** Logistic regression assumes a linear relationship between log-odds and features, which limits its ability to capture interactions between heuristics. Non-linear classifiers like **random forests** or **gradient-boosted trees (XGBoost)** would likely improve performance, since they can naturally model interactions like "high Adamic-Adar AND high preferential attachment together" without manual feature engineering.
+
+**Node-level features.** The current model uses only pair-level similarity scores. Adding features about the individual nodes — degree, centrality scores from HW1, community membership, document-level metadata (e.g., category of documents in which the entity appears) — would give the model richer information.
+
+**Graph-aware embeddings.** Modern approaches like **node2vec**, **DeepWalk**, or **graph neural networks (GNNs)** learn dense vector representations of nodes from the network structure itself, then use vector similarity (cosine, dot product) as a predictor. These approaches typically outperform classical heuristics by a wide margin.
+
+**Address class imbalance more carefully.** We sampled the negative class only from well-connected nodes (degree > 10), which makes the task harder. In a real-world deployment one would also need to handle the extreme imbalance between observed links and the vast number of possible non-links, possibly through stratified sampling or weighting schemes.
+
+**Reduce data quality issues at the source.** As discussed in HW1, the AI extraction pipeline collapses distinct individuals under labels like "unknown person A," and even our alias map only handles obvious surface variants. A more careful entity resolution step — using document-aware deduplication that distinguishes "unknown person A" appearing in different documents — would produce a cleaner network with more meaningful links to predict.
+
+## References
+
+
