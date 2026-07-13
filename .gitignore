@@ -1,0 +1,19 @@
+# R
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+*.Rproj
+
+# Downloaded data (fetched at runtime by the scripts)
+epstein_docs.db
+
+# Quarto / R Markdown
+/.quarto/
+*_files/
+*_cache/
+*.html
+
+# OS
+.DS_Store
+Thumbs.db
